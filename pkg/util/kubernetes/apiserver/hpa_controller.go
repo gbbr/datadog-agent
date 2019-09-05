@@ -29,6 +29,9 @@ import (
 	"github.com/DataDog/datadog-agent/pkg/util/kubernetes/apiserver/common"
 	"github.com/DataDog/datadog-agent/pkg/util/kubernetes/hpa"
 	"github.com/DataDog/datadog-agent/pkg/util/log"
+	"github.com/DataDog/watermarkpodautoscaler/pkg/client/informers/externalversions/datadoghq/v1alpha1"
+	v1alpha12 "github.com/DataDog/watermarkpodautoscaler/pkg/client/listers/datadoghq/v1alpha1"
+	v1alpha13 "github.com/DataDog/watermarkpodautoscaler/pkg/apis/datadoghq/v1alpha1"
 )
 
 const (
@@ -56,6 +59,10 @@ type metricsBatch struct {
 type AutoscalersController struct {
 	autoscalersLister       autoscalerslister.HorizontalPodAutoscalerLister
 	autoscalersListerSynced cache.InformerSynced
+
+	wpaLister v1alpha12.WatermarkPodAutoscalerLister
+	wpaListerSynced cache.InformerSynced
+
 	// Autoscalers that need to be added to the cache.
 	queue workqueue.RateLimitingInterface
 
@@ -72,7 +79,7 @@ type AutoscalersController struct {
 }
 
 // NewAutoscalersController returns a new AutoscalersController
-func NewAutoscalersController(client kubernetes.Interface, le LeaderElectorInterface, dogCl hpa.DatadogClient, autoscalingInformer autoscalersinformer.HorizontalPodAutoscalerInformer) (*AutoscalersController, error) {
+func NewAutoscalersController(client kubernetes.Interface, le LeaderElectorInterface, dogCl hpa.DatadogClient, autoscalingInformer autoscalersinformer.HorizontalPodAutoscalerInformer, wpaInformer v1alpha1.WatermarkPodAutoscalerInformer) (*AutoscalersController, error) {
 	var err error
 
 	h := &AutoscalersController{
@@ -119,6 +126,17 @@ func NewAutoscalersController(client kubernetes.Interface, le LeaderElectorInter
 	)
 	h.autoscalersLister = autoscalingInformer.Lister()
 	h.autoscalersListerSynced = autoscalingInformer.Informer().HasSynced
+
+	wpaInformer.Informer().AddEventHandler(
+		cache.ResourceEventHandlerFuncs{
+			AddFunc:  h.addWPAutoscaler,
+			UpdateFunc: h.updateAutoscaler,
+			DeleteFunc: h.deleteAutoscaler,
+		},
+	)
+	h.wpaLister = wpaInformer.Lister()
+	h.wpaListerSynced = wpaInformer.Informer().HasSynced
+
 	return h, nil
 }
 
@@ -131,7 +149,9 @@ func (h *AutoscalersController) Run(stopCh <-chan struct{}) {
 	if !cache.WaitForCacheSync(stopCh, h.autoscalersListerSynced) {
 		return
 	}
-
+	if !cache.WaitForCacheSync(stopCh, h.wpaListerSynced) {
+		return
+	}
 	h.processingLoop()
 
 	go wait.Until(h.worker, time.Second, stopCh)
@@ -309,7 +329,15 @@ func (h *AutoscalersController) syncAutoscalers(key interface{}) error {
 	}
 	return err
 }
-
+func (h *AutoscalersController) addWPAutoscaler(obj interface{}) {
+	newAutoscaler, ok := obj.(*v1alpha13.WatermarkPodAutoscaler)
+	if !ok {
+		log.Errorf("Expected an WatermarkPodAutoscaler type, got: %v", obj)
+		return
+	}
+	log.Debugf("Adding WPA %s/%s", newAutoscaler.Namespace, newAutoscaler.Name)
+	h.enqueue(newAutoscaler)
+}
 func (h *AutoscalersController) addAutoscaler(obj interface{}) {
 	newAutoscaler, ok := obj.(*autoscalingv2.HorizontalPodAutoscaler)
 	if !ok {

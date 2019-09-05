@@ -149,5 +149,8 @@ func NewDatadogClient() (*datadog.Client, error) {
 		return nil, errors.New("missing the api/app key pair to query Datadog")
 	}
 	log.Infof("Initialized the Datadog Client for HPA")
-	return datadog.NewClient(apiKey, appKey), nil
+	cl := datadog.NewClient(apiKey, appKey)
+	cl.HeaderExtra = map[string]string{"User-Agent": "Datadog-Cluster-Agent"}
+
+	return cl , nil
 }

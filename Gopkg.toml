@@ -206,3 +206,16 @@
   name = "github.com/ianlancetaylor/cgosymbolizer"
   source = "github.com/ianlancetaylor/cgosymbolizer"
   revision = "f5072df9c550dc687157e5d7efb50825cdf8f0eb"
+
+[[override]]
+  name = "sigs.k8s.io/controller-runtime"
+  source = "https://github.com/kubernetes-sigs/controller-runtime"
+  version = "v0.2.0"
+
+[[override]]
+  name = "gopkg.in/fsnotify.v1"
+  source = "https://github.com/fsnotify/fsnotify.git"
+
+[[constraint]]
+  name = "github.com/DataDog/watermarkpodautoscaler"
+  revision = "ac59ac96082cfc17aef61963e19cb0e5994ac6f1"
