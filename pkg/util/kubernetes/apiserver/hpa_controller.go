@@ -130,8 +130,8 @@ func NewAutoscalersController(client kubernetes.Interface, le LeaderElectorInter
 	wpaInformer.Informer().AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:  h.addWPAutoscaler,
-			UpdateFunc: h.updateAutoscaler,
-			DeleteFunc: h.deleteAutoscaler,
+			UpdateFunc: h.updateWPAutoscaler,
+			DeleteFunc: h.deleteWPAutoscaler,
 		},
 	)
 	h.wpaLister = wpaInformer.Lister()
@@ -143,8 +143,8 @@ func NewAutoscalersController(client kubernetes.Interface, le LeaderElectorInter
 func (h *AutoscalersController) Run(stopCh <-chan struct{}) {
 	defer h.queue.ShutDown()
 
-	log.Infof("Starting HPA Controller ... ")
-	defer log.Infof("Stopping HPA Controller")
+	log.Infof("Starting HPA & WPA Controller ... ")
+	defer log.Infof("Stopping HPA & WPA Controller")
 
 	if !cache.WaitForCacheSync(stopCh, h.autoscalersListerSynced) {
 		return
@@ -329,6 +329,7 @@ func (h *AutoscalersController) syncAutoscalers(key interface{}) error {
 	}
 	return err
 }
+
 func (h *AutoscalersController) addWPAutoscaler(obj interface{}) {
 	newAutoscaler, ok := obj.(*v1alpha13.WatermarkPodAutoscaler)
 	if !ok {
@@ -338,6 +339,7 @@ func (h *AutoscalersController) addWPAutoscaler(obj interface{}) {
 	log.Debugf("Adding WPA %s/%s", newAutoscaler.Namespace, newAutoscaler.Name)
 	h.enqueue(newAutoscaler)
 }
+
 func (h *AutoscalersController) addAutoscaler(obj interface{}) {
 	newAutoscaler, ok := obj.(*autoscalingv2.HorizontalPodAutoscaler)
 	if !ok {
@@ -345,6 +347,31 @@ func (h *AutoscalersController) addAutoscaler(obj interface{}) {
 		return
 	}
 	log.Debugf("Adding autoscaler %s/%s", newAutoscaler.Namespace, newAutoscaler.Name)
+	h.enqueue(newAutoscaler)
+}
+
+func (h *AutoscalersController) updateWPAutoscaler(old, obj interface{}) {
+	newAutoscaler, ok := obj.(*v1alpha13.WatermarkPodAutoscaler)
+	if !ok {
+		log.Errorf("Expected an HorizontalPodAutoscaler type, got: %v", obj)
+		return
+	}
+	oldAutoscaler, ok := old.(*v1alpha13.WatermarkPodAutoscaler)
+	if !ok {
+		log.Errorf("Expected an HorizontalPodAutoscaler type, got: %v", old)
+		h.enqueue(newAutoscaler) // We still want to enqueue the newAutoscaler to get the new change
+		return
+	}
+
+	if !hpa.WPAutoscalerMetricsUpdate(newAutoscaler, oldAutoscaler) {
+		log.Tracef("Update received for the %s/%s, without a relevant change to the configuration", newAutoscaler.Namespace, newAutoscaler.Name)
+		return
+	}
+	// Need to delete the old object from the local cache. If the labels have changed, the syncAutoscaler would not override the old key.
+	toDelete := hpa.InspectWPA(oldAutoscaler)
+	h.deleteFromLocalStore(toDelete)
+
+	log.Tracef("Processing update event for autoscaler %s/%s with configuration: %s", newAutoscaler.Namespace, newAutoscaler.Name, newAutoscaler.Annotations)
 	h.enqueue(newAutoscaler)
 }
 
@@ -419,6 +446,52 @@ func (h *AutoscalersController) deleteAutoscaler(obj interface{}) {
 	h.deleteFromLocalStore(toDelete)
 	if err := h.store.DeleteExternalMetricValues(toDelete); err != nil {
 		h.enqueue(deletedHPA)
+		return
+	}
+}
+
+// Processing the Delete Events in the Eventhandler as obj is deleted from the local store thereafter.
+// Only here can we retrieve the content of the WPA to properly process and delete it.
+// FIXME we could have an update in the queue while processing the deletion, we should make
+// sure we process them in order instead. For now, the gc logic allows us to recover.
+func (h *AutoscalersController) deleteWPAutoscaler(obj interface{}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	deletedWPA, ok := obj.(*v1alpha13.WatermarkPodAutoscaler)
+	if ok {
+		toDelete := hpa.InspectWPA(deletedWPA)
+		h.deleteFromLocalStore(toDelete)
+		log.Debugf("Deleting %s/%s from the local cache", deletedWPA.Namespace, deletedWPA.Name)
+		if !h.le.IsLeader() {
+			return
+		}
+		log.Infof("Deleting entries of metrics from HPA %s/%s in the Global Store", deletedWPA.Namespace, deletedWPA.Name)
+		if err := h.store.DeleteExternalMetricValues(toDelete); err != nil {
+			h.enqueue(deletedWPA)
+			return
+		}
+		return
+	}
+
+	tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+	if !ok {
+		log.Errorf("Could not get object from tombstone %#v", obj)
+		return
+	}
+
+	deletedWPA, ok = tombstone.Obj.(*v1alpha13.WatermarkPodAutoscaler)
+	if !ok {
+		log.Errorf("Tombstone contained object that is not an Autoscaler: %#v", obj)
+		return
+	}
+
+	log.Debugf("Deleting Metrics from HPA %s/%s", deletedWPA.Namespace, deletedWPA.Name)
+	toDelete := hpa.InspectWPA(deletedWPA)
+	log.Debugf("Deleting %s/%s from the local cache", deletedWPA.Namespace, deletedWPA.Name)
+	h.deleteFromLocalStore(toDelete)
+	if err := h.store.DeleteExternalMetricValues(toDelete); err != nil {
+		h.enqueue(deletedWPA)
 		return
 	}
 }
