@@ -129,7 +129,7 @@ func NewTracer(config *Config) (*Tracer, error) {
 	}
 
 	var reverseDNS ReverseDNS = nullReverseDNS{}
-	if config.DNSSnooping {
+	if config.DNSInspection {
 		filter := m.SocketFilter("socket/dns_filter")
 		if filter == nil {
 			return nil, fmt.Errorf("error retrieving socket filter")
